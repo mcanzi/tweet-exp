@@ -1,0 +1,226 @@
+---
+title: "Exploring tweets with R and Python"
+author: "Massimiliano Canzi"
+date: "20/07/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This article contains a brief tutorial on how to download twwets in R, perform sentiment analysis with nltk and VADER in Python and then later use this information to produce informative plots with ggplot and tidyverse. 
+
+First, we load the necessary libraries
+
+```{r, warning=FALSE}
+library("twitteR")
+library("ROAuth")
+library("tidyverse")
+library("viridis")
+library("ggdark")
+library("lme4")
+library("lmerTest")
+library("reticulate")
+
+# Download the file and store in your working directory
+#download.file(url= "http://curl.haxx.se/ca/cacert.pem", destfile= "cacert.pem")
+```
+
+In order to be able to download your own tweets, you need API consumer keys. You can obtain those by creating a Twitter App on the Developer page. Once you have the two costumer API keys, substitute them in lines 36 and 37, below. 
+
+```{r, eval=FALSE}
+credentials <- OAuthFactory$new(
+  consumerKey = 'XXXXXXXXX',
+  consumerSecret = 'XXXXXXXXXXX',
+  requestURL = 'https://api.twitter.com/oauth/request_token',
+  accessURL = 'https://api.twitter.com/oauth/access_token',
+  authURL = 'https://api.twitter.com/oauth/authorize')
+
+credentials$handshake(cainfo="cacert.pem")
+
+save(credentials, file = 'twitter authentication.Rdata')
+```
+
+You need to run the chunk above the first time only. From now on, you can simply skip to the next step after you have loaded the necessary libraries. The step below loads the saved authorisation details and sets up your app. 
+
+```{r, eval=FALSE}
+load('twitter authentication.Rdata')
+
+setup_twitter_oauth(credentials$consumerKey, credentials$consumerSecret, credentials$oauthKey, credentials$oauthSecret)
+```
+
+Now we can download tweets. I download the latest 3000 tweets by Joe Biden, excluding retweets but including replies to other weets. I save the data to a dataframe, and then to a .csv file.
+
+```{r, eval=FALSE}
+jb <- twListToDF(userTimeline("JoeBiden", n = 3000, includeRts = FALSE, excludeReplies = TRUE)) 
+write_csv(jb, "biden_tweets.csv")
+```
+
+In Python, load the required library and download the VADER lexicon (you only need to download the lexicon once). 
+
+```{python, eval=FALSE}
+import nltk
+import pandas as pd
+import numpy as np
+#  nltk.download('vader_lexicon')
+```
+
+Now it's time to calculate sentiment scores for each tweet and compound values (from -1 to +1, where -1 is very negative and +1 is very positive). We also apply a comp_score label <pos> for positive tweets (compound > 0) and a <neg> label for negative (compound < 0).
+
+```{python, eval=FALSE}
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+sid = SentimentIntensityAnalyzer()
+
+df = pd.read_csv("biden_tweets.csv")
+df['scores'] = df['text'].apply(lambda review: sid.polarity_scores(review))
+df['compound']  = df['scores'].apply(lambda score_dict: score_dict['compound'])
+df['comp_score'] = df['compound'].apply(lambda c: 'pos' if c >=0 else 'neg')
+
+df.to_csv("realdonaldtrump_vader.csv")
+```
+
+We can now load the dataframe in R
+
+```{r, warning=FALSE}
+df <- read_csv("biden_tweets_vader.csv")
+head(df)
+```
+
+The following code creates two scatterplot: 1) compound sentiment score ~ n. of retweets, with n. of favorite on the z axis. Plot 2) swaps the n. of favorites and n. of retweets variables. Overall, there seems to be no visible pattern here between the number of retweets / favorites and how positive or negative a certain tweet is, but certainly number of retweets and favorites seem to be correlated, which is hardly a surprise. 
+
+```{r}
+filter(df, df$compound != 0) %>%
+  filter(retweetCount <= 10000) %>%
+  ggplot(aes(x = compound, y = retweetCount, color = favoriteCount)) +
+  geom_vline(xintercept = 0, size = 0.5, alpha = 0.8, linetype = "dashed" ) +
+  geom_point(size = 0.8, alpha = 0.8) +
+  ylim(0, 10000) +
+  xlab("Sentiment Score") +
+  ylab("Retweet Count") +
+  scale_color_viridis(option = "viridis", name = "Favorite Count", limits = c(0, 30000)) +
+  ggtitle(paste("Retweet count by VADER sentiment scores for", length(df$text), "tweets by Joe Biden.")) +
+  dark_theme_minimal()
+
+filter(df, df$compound != 0) %>%
+  filter(favoriteCount <= 30000) %>%
+  ggplot(aes(x = compound, y = favoriteCount, color = retweetCount)) +
+  geom_vline(xintercept = 0, size = 0.5, alpha = 0.8, linetype = "dashed" ) +
+  geom_point(size = 0.8, alpha = 0.8) +
+  ylim(0, 30000) +
+  xlab("Sentiment Score") +
+  ylab("Favorite Count") +
+  scale_color_viridis(option = "plasma", name = "Retweet Count", limits = c(0, 10000)) +
+  ggtitle(paste("Favorite count by VADER sentiment scores for", length(df$text), "tweets by Joe Biden.")) +
+  dark_theme_minimal()
+```
+
+Plot 3) and 4) show sentiment score by hour of day and month of year. The z dimension represents n. of favorites for each tweet. 
+
+```{r}
+df$createdHour <- strftime(df$created, format="%H:%M:%S")
+df$createdHour <- as.POSIXct(df$createdHour, format="%H:%M:%S")
+
+filter(df, df$compound != 0) %>%
+  filter(favoriteCount <= 30000) %>%
+  ggplot(aes(x = createdHour, y = compound, color = favoriteCount)) +
+  scale_x_datetime(date_labels = "%H:%M", date_breaks = "4 hours") +
+  geom_hline(yintercept = 0, size = 0.5, alpha = 0.8, linetype = "dashed" ) +
+  geom_point(size = 1.5, alpha = 0.8) +
+  xlab("Time of Day") +
+  ylab("Sentiment Score") +
+  scale_color_viridis(option = "magma", name = "Favorite Count", limits = c(0, 30000)) +
+  ggtitle(paste("Sentiment scores by time of day for", length(df$text), "tweets by Joe Biden.")) +
+  dark_theme_minimal()
+
+filter(df, df$compound != 0) %>%
+  filter(favoriteCount <= 30000) %>%
+  ggplot(aes(x = created, y = compound, color = favoriteCount)) +
+  scale_x_datetime(date_labels = "%b", date_breaks = "1 month") +
+  geom_hline(yintercept = 0, size = 0.5, alpha = 0.8, linetype = "dashed" ) +
+  geom_point(size = 1.5, alpha = 0.8) +
+  xlab("Month") +
+  ylab("Sentiment Score") +
+  scale_color_viridis(option = "magma", name = "Favorite Count", limits = c(0, 30000)) +
+  ggtitle(paste("Sentiment scores by month for", length(df$text), "tweets by Joe Biden.")) +
+  dark_theme_minimal()
+```
+
+Here we load a similar dataset containing 10 years of tweets by Donald Trump. The dataset is readily available online, I calculated sentiment scores with Vader using the code above.
+
+```{r, warning=FALSE}
+dt <- read_csv("realdonaldtrump_vader.csv")
+head(dt)
+```
+
+Retweets and favorites over time, coloured by compound score labels, negative or positive. 
+
+```{r}
+
+dt$date <- as.POSIXct(dt$date, format="%Y/%m/%d %H:%M:%S")
+y_max <- median(dt$retweets) + 8 * sd(dt$retweets)
+fav_max <- median(dt$favorites) + 8 * sd(dt$favorites)
+dt$year <- as.factor(as.POSIXlt(dt$date)$year + 1900)
+
+dt2 <- filter(dt, compound != 0) %>%
+  filter(year %in% c("2016", "2017", "2018", "2019", "2020")) %>%
+  filter(favorites < fav_max) %>%
+  filter(retweets < y_max)
+
+ggplot(dt2, aes(x = date, y = retweets, color = comp_score)) +
+  scale_x_datetime(date_labels = "%y", date_breaks = "1 year") +
+  geom_point(size = 0.5, alpha = 0.8) +
+  ylim(0, y_max) +
+  xlab("Year") +
+  ylab("Retweets") +
+  scale_color_manual(values = c("indianred2", "deepskyblue4"), name = "Sentiment Label", labels = c("Negative", "Positive")) +
+  ggtitle(paste("Retweet scores by time and SL for", length(dt2$content), "tweets by @realDonaldTrump")) +
+  #facet_grid(facets = dt2$comp_score) +
+  dark_theme_minimal()
+
+ggplot(dt2, aes(x = date, y = favorites, color = comp_score)) +
+  scale_x_datetime(date_labels = "%y", date_breaks = "1 year") +
+  geom_point(size = 0.5, alpha = 0.8) +
+  ylim(0, fav_max) +
+  xlab("Year") +
+  ylab("Favorites") +
+  scale_color_manual(values = c("indianred2", "deepskyblue4"), name = "Sentiment Label", labels = c("Negative", "Positive")) +
+  ggtitle(paste("Retweet scores by time and SL for", length(dt$content), "tweets by @realDonaldTrump")) +
+  dark_theme_minimal()
+```
+
+```{r}
+ggplot(dt2, aes(x = compound, y = retweets, color = year)) +
+  #scale_x_datetime(date_labels = "%y", date_breaks = "1 year") +
+  #geom_hline(yintercept = 0, size = 0.5, alpha = 0.8, linetype = "dashed" ) +
+  geom_point(size = 0.5, alpha = 0.8) +
+  #geom_abline(formula = retweets ~ comp_score) +
+  xlim(-1, 1) +
+  ylim(0, y_max) +
+  xlab("Sentiment") +
+  ylab("Retweet") +
+  scale_color_viridis_d(option = "plasma", name = "Year") +
+  ggtitle(paste("Retweets by sentiment scores over", length(dt$content), "tweets by @realDonaldTrump")) +
+  dark_theme_minimal()
+```
+
+We can now do more interesting things.. we can for example isolate tweets that contain "fake news" using grepl and regular expressions, and we can plot their retweet count over time. We can also map tweets that contain CNN and see what the overlap is between CNN and "fake news". 
+
+```{r}
+dt_fn <- filter(dt2, grepl('fake news|FAKE NEWS', content))
+dt_cnn <- filter(dt2, grepl('CNN|cnn', content))
+
+ggplot(dt_fn, aes(x = date, y = retweets, color = )) +
+  scale_x_datetime(date_labels = "%y", date_breaks = "1 year") +
+  geom_point(size = 1.2, alpha = 0.8, aes(color = "red")) +
+  geom_point(data = dt_cnn, size = 0.8, alpha = 0.6, aes(color = "blue")) +
+  ylim(0, y_max) +
+  xlab("Year") +
+  ylab("Retweets") +
+  scale_color_discrete(name = "Expression", labels = c("fake news", "CNN")) +
+  ggtitle(paste("\"fake news\" and CNN over time in", length(dt$content), "tweets by @realDonaldTrump")) +
+  dark_theme_minimal()
+```
+
